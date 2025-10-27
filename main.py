@@ -167,8 +167,8 @@ def continuous_job_checker():
         except Exception as e:
             logging.critical(f"An unhandled error occurred in the job checker loop: {e}")
         
-        # Check every 8 minutes (480 seconds)
-        sleep_duration = 480
+        # Check every 5 minutes (300 seconds)
+        sleep_duration = 300
         logging.info(f"Check cycle complete. Sleeping for {sleep_duration / 60:.0f} minutes.")
         time.sleep(sleep_duration)
 
@@ -179,4 +179,5 @@ if __name__ == "__main__":
 
     # Run the Flask app using Waitress, a production-ready server
     logging.info("Starting Flask server...")
+
     serve(app, host='0.0.0.0', port=10000)
