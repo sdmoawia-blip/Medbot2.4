@@ -102,14 +102,24 @@ def parse_date(entry):
     return "N/A"
 
 def fetch_and_process_feed(feed_url, seen_jobs, source_name):
-    """Fetches a single RSS feed and processes new entries."""
+    """Fetches a single RSS feed with a timeout and processes new entries."""
     new_jobs_found_count = 0
+    headers = {
+        'User-Agent': 'UKJuniorDoctorBot/1.0; (by /u/YourUsername; an automated job scraper)'
+    }
+    
     try:
-        feed = feedparser.parse(feed_url)
-        if feed.bozo:
-            logging.warning(f"Warning processing {source_name}: {feed.bozo_exception}")
+        # Step 1: Fetch the feed content with a strict timeout
+        logging.info(f"Fetching {source_name} from {feed_url}...")
+        response = requests.get(feed_url, headers=headers, timeout=15) # 15-second timeout
+        response.raise_for_status() # Raise an exception for bad status codes (like 404 or 500)
+        content = response.content
+        logging.info(f"Successfully fetched content for {source_name}.")
 
-        logging.info(f"Fetched {len(feed.entries)} entries from {source_name}.")
+        # Step 2: Parse the fetched content
+        feed = feedparser.parse(content)
+        if feed.bozo:
+            logging.warning(f"Warning processing {source_name}: Malformed feed data - {feed.bozo_exception}")
 
         # Process entries from oldest to newest to send in chronological order
         for entry in reversed(feed.entries):
@@ -130,8 +140,12 @@ def fetch_and_process_feed(feed_url, seen_jobs, source_name):
                     new_jobs_found_count += 1
                     time.sleep(2) # Stagger messages to avoid Telegram rate limits
 
+    except requests.exceptions.Timeout:
+        logging.error(f"Timeout error when fetching {source_name} at {feed_url}. The server took too long to respond.")
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Network error when fetching {source_name}: {e}")
     except Exception as e:
-        logging.error(f"Error processing {source_name} feed at {feed_url}: {e}")
+        logging.error(f"An unexpected error occurred while processing {source_name}: {e}")
 
     return new_jobs_found_count > 0
 
@@ -181,3 +195,4 @@ if __name__ == "__main__":
     logging.info("Starting Flask server...")
 
     serve(app, host='0.0.0.0', port=10000)
+
