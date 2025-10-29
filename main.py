@@ -163,7 +163,7 @@ def check_for_new_jobs():
             any_new_jobs = True
 
         # 2. HealthJobsUK
-        hjuk_url = HEALTHJOBSUK_URL.format(requests.utils.quote(keyword))
+        hjuk_url = HEALTHJOBSUK_URL.format(requests.utils.quote(keyword.replace(' ', '-')))
         if fetch_and_process_feed(hjuk_url, seen_jobs, f"HealthJobsUK ('{keyword}')"):
             any_new_jobs = True
 
@@ -195,6 +195,7 @@ if __name__ == "__main__":
     logging.info("Starting Flask server...")
 
     serve(app, host='0.0.0.0', port=10000)
+
 
 
 
