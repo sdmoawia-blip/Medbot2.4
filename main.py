@@ -164,45 +164,45 @@ def check_for_new_jobs():
         if fetch_and_process_feed(nhs_url, seen_jobs, f"NHS Jobs ('{keyword}')"):
             any_new_jobs = True
 
-    # --- 2. Process HealthJobsUK with a SINGLE generic feed and then filter ---
+    # --- 2. Process HealthJobsUK with search-based feeds ---
     logging.info("--- Checking HealthJobsUK Source ---")
-    try:
-        # We fetch the single generic feed
-        logging.info(f"Fetching generic feed from {HEALTHJOBSUK_URL}...")
-        response = requests.get(HEALTHJOBSUK_URL, timeout=15)
-        response.raise_for_status()
-        content = response.content
-        logging.info("Successfully fetched generic feed from HealthJobsUK.")
+    for keyword in SEARCH_KEYWORDS:
+        hjuk_url = f"https://www.healthjobsuk.com/job_search/rss?keyword={requests.utils.quote(keyword)}"
+        try:
+            logging.info(f"Fetching HealthJobsUK ('{keyword}') from {hjuk_url}...")
+            response = requests.get(hjuk_url, timeout=15)
+            response.raise_for_status()
+            content = response.content
+            logging.info(f"Successfully fetched content for HealthJobsUK ('{keyword}').")
 
-        hjuk_feed = feedparser.parse(content)
-        if hjuk_feed.bozo:
-            logging.warning(f"Warning processing HealthJobsUK: Malformed feed data - {hjuk_feed.bozo_exception}")
+            hjuk_feed = feedparser.parse(content)
+            if hjuk_feed.bozo:
+                logging.warning(f"Warning processing HealthJobsUK ('{keyword}'): Malformed feed data - {hjuk_feed.bozo_exception}")
 
-        # Now we loop through the results and filter them by our keywords
-        for entry in reversed(hjuk_feed.entries):
-            job_id = entry.get('id', entry.link)
-            job_title = entry.title.strip()
-            job_title_lower = job_title.lower()
-
-            # The new filtering step:
-            if any(keyword.lower() in job_title_lower for keyword in SEARCH_KEYWORDS):
-                # This job is relevant. Now check if it's new.
+            for entry in reversed(hjuk_feed.entries):
+                job_id = entry.get('id', entry.link)
                 if job_id not in seen_jobs:
-                    logging.info(f"Found new relevant job on HealthJobsUK: '{job_title}'")
+                    job_title = entry.title.strip()
                     job_link = entry.link
                     published_date = parse_date(entry)
+
                     message = (
                         f"🩺 **{job_title}**\n"
                         f"📅 Published: {published_date}\n"
                         f"🔗 [Link to apply]({job_link})"
                     )
+
                     if send_telegram_message(message):
                         seen_jobs.add(job_id)
                         any_new_jobs = True
-                        time.sleep(2) # Avoid rate limiting
-                        
-    except Exception as e:
-        logging.error(f"Failed to process the generic HealthJobsUK feed: {e}", exc_info=True)
+                        time.sleep(2)  # avoid Telegram rate limits
+
+        except requests.exceptions.Timeout:
+            logging.error(f"Timeout when fetching HealthJobsUK ('{keyword}')")
+        except requests.exceptions.RequestException as e:
+            logging.error(f"Network error when fetching HealthJobsUK ('{keyword}'): {e}")
+        except Exception as e:
+            logging.error(f"Unexpected error processing HealthJobsUK ('{keyword}'): {e}", exc_info=True)
 
 
     if any_new_jobs:
@@ -233,6 +233,7 @@ if __name__ == "__main__":
     logging.info("Starting Flask server...")
 
     serve(app, host='0.0.0.0', port=10000)
+
 
 
 
