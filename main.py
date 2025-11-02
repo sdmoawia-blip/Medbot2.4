@@ -25,7 +25,7 @@ SEARCH_KEYWORDS = [
 
 # RSS Feeds to monitor
 NHS_JOBS_URL = "https://www.jobs.nhs.uk/candidate/search/results?keyword={}&field=title&location=UK&sort=publicationDate&jobPostType=all&payBand=all&workArrangement=all&rss=1"
-HEALTHJOBSUK_URL = "https://www.healthjobsuk.com/rss/feed/2/medical-dental"
+HEALTHJOBSUK_URL = "https://www.healthjobsuk.com/jobs.rss"
 
 # --- Persistence & State Management ---
 DB_FILE = "seen_jobs.json"
@@ -233,6 +233,7 @@ if __name__ == "__main__":
     logging.info("Starting Flask server...")
 
     serve(app, host='0.0.0.0', port=10000)
+
 
 
 
