@@ -25,7 +25,7 @@ SEARCH_KEYWORDS = [
 
 # RSS Feeds to monitor
 NHS_JOBS_URL = "https://www.jobs.nhs.uk/candidate/search/results?keyword={}&field=title&location=UK&sort=publicationDate&jobPostType=all&payBand=all&workArrangement=all&rss=1"
-HEALTHJOBSUK_URL = "https://www.healthjobsuk.com/jobs/{}/rss"
+HEALTHJOBSUK_URL = "https://www.healthjobsuk.com/rss/jobs-in-c-medical-dental"
 
 # --- Persistence & State Management ---
 DB_FILE = "seen_jobs.json"
@@ -150,29 +150,67 @@ def fetch_and_process_feed(feed_url, seen_jobs, source_name):
     return new_jobs_found_count > 0
 
 def check_for_new_jobs():
-    """Main function to iterate through keywords and feeds to find new jobs."""
+    """Main function to find new jobs from all sources."""
     seen_jobs = load_seen_jobs()
     any_new_jobs = False
 
-    logging.info("Starting new job check cycle...")
+    logging.info("--- Starting new job check cycle ---")
 
+    # --- 1. Process NHS Jobs by looping through each keyword ---
+    logging.info("--- Checking NHS Jobs Source ---")
     for keyword in SEARCH_KEYWORDS:
-        # 1. NHS Jobs
+        # NHS URL supports keyword searches, so we format it each time
         nhs_url = NHS_JOBS_URL.format(requests.utils.quote(keyword))
         if fetch_and_process_feed(nhs_url, seen_jobs, f"NHS Jobs ('{keyword}')"):
             any_new_jobs = True
 
-        # 2. HealthJobsUK
-        hjuk_url = HEALTHJOBSUK_URL.format(requests.utils.quote(keyword.replace(' ', '-')))
-        if fetch_and_process_feed(hjuk_url, seen_jobs, f"HealthJobsUK ('{keyword}')"):
-            any_new_jobs = True
+    # --- 2. Process HealthJobsUK with a SINGLE generic feed and then filter ---
+    logging.info("--- Checking HealthJobsUK Source ---")
+    try:
+        # We fetch the single generic feed
+        logging.info(f"Fetching generic feed from {HEALTHJOBSUK_URL}...")
+        response = requests.get(HEALTHJOBSUK_URL, timeout=15)
+        response.raise_for_status()
+        content = response.content
+        logging.info("Successfully fetched generic feed from HealthJobsUK.")
+
+        hjuk_feed = feedparser.parse(content)
+        if hjuk_feed.bozo:
+            logging.warning(f"Warning processing HealthJobsUK: Malformed feed data - {hjuk_feed.bozo_exception}")
+
+        # Now we loop through the results and filter them by our keywords
+        for entry in reversed(hjuk_feed.entries):
+            job_id = entry.get('id', entry.link)
+            job_title = entry.title.strip()
+            job_title_lower = job_title.lower()
+
+            # The new filtering step:
+            if any(keyword.lower() in job_title_lower for keyword in SEARCH_KEYWORDS):
+                # This job is relevant. Now check if it's new.
+                if job_id not in seen_jobs:
+                    logging.info(f"Found new relevant job on HealthJobsUK: '{job_title}'")
+                    job_link = entry.link
+                    published_date = parse_date(entry)
+                    message = (
+                        f"🩺 **{job_title}**\n"
+                        f"📅 Published: {published_date}\n"
+                        f"🔗 [Link to apply]({job_link})"
+                    )
+                    if send_telegram_message(message):
+                        seen_jobs.add(job_id)
+                        any_new_jobs = True
+                        time.sleep(2) # Avoid rate limiting
+                        
+    except Exception as e:
+        logging.error(f"Failed to process the generic HealthJobsUK feed: {e}", exc_info=True)
+
 
     if any_new_jobs:
         save_seen_jobs(seen_jobs)
-        logging.info("New jobs found and sent. Database updated.")
+        logging.info("New jobs were found and sent. Database updated.")
     else:
         logging.info("No new jobs found in this cycle.")
-
+        
 def continuous_job_checker():
     """Runs the job check function in a loop with a delay."""
     while True:
@@ -195,6 +233,7 @@ if __name__ == "__main__":
     logging.info("Starting Flask server...")
 
     serve(app, host='0.0.0.0', port=10000)
+
 
 
 
