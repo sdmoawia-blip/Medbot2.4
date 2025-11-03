@@ -29,7 +29,7 @@ SEARCH_KEYWORDS = [
 
 # --- RSS Feeds ---
 NHS_JOBS_URL = "https://www.jobs.nhs.uk/candidate/search/results?keyword={}&field=title&location=UK&sort=publicationDate&jobPostType=all&payBand=all&workArrangement=all&rss=1"
-HEALTHJOBSUK_URL = "https://www.healthjobsuk.com/job_search/rss?keyword={}"
+HEALTHJOBSUK_URL = "https://www.healthjobsuk.com/jobs.rss"
 
 # --- Persistence & State Management ---
 DB_FILE = "seen_jobs.json"
@@ -99,10 +99,11 @@ def parse_date(entry):
     return "N/A"
 
 def extract_job_details(entry):
-    """Extracts a short snippet and optional fields from feed entry."""
+    """Extracts a short snippet from the feed entry, plus employer, specialty, salary, location if possible."""
     snippet = entry.get('summary', '') or entry.get('description', '') or ''
     snippet = re.sub('<.*?>', '', snippet)  # Remove HTML tags
 
+    # Attempt to parse key fields using simple regex patterns
     employer = re.search(r'Employer[:\s]*(.+?)(?:\n|$)', snippet, re.IGNORECASE)
     specialty = re.search(r'Specialty[:\s]*(.+?)(?:\n|$)', snippet, re.IGNORECASE)
     salary = re.search(r'Salary[:\s]*(.+?)(?:\n|$)', snippet, re.IGNORECASE)
@@ -135,19 +136,23 @@ def format_message(entry):
         message += f"Location: {details['location']}\n"
     return message
 
-# --- Core Bot Logic ---
+# --- Core Bot Logic with Feed Sanitization ---
 def fetch_and_process_feed(feed_url, seen_jobs, source_name):
     new_jobs_found_count = 0
-    headers = {'User-Agent': 'UKJuniorDoctorBot/1.0'}
+    headers = {
+        'User-Agent': 'UKJuniorDoctorBot/1.0; (automated job scraper)'
+    }
     try:
         logging.info(f"Fetching {source_name} from {feed_url}...")
         response = requests.get(feed_url, headers=headers, timeout=15)
         response.raise_for_status()
         raw_content = response.content
 
+        # --- SANITIZE FEED ---
         soup = BeautifulSoup(raw_content, "xml")
         sanitized_content = str(soup)
 
+        # --- PARSE FEED ---
         feed = feedparser.parse(sanitized_content)
         if feed.bozo:
             logging.warning(f"Warning processing {source_name}: Malformed feed data - {feed.bozo_exception}")
@@ -176,17 +181,17 @@ def check_for_new_jobs():
 
     logging.info("--- Starting new job check cycle ---")
 
-    # NHS Jobs
+    # --- NHS Jobs ---
     logging.info("--- Checking NHS Jobs ---")
     for keyword in SEARCH_KEYWORDS:
         nhs_url = NHS_JOBS_URL.format(requests.utils.quote(keyword))
         if fetch_and_process_feed(nhs_url, seen_jobs, f"NHS Jobs ('{keyword}')"):
             any_new_jobs = True
 
-    # HealthJobsUK
+    # --- HealthJobsUK ---
     logging.info("--- Checking HealthJobsUK ---")
     for keyword in SEARCH_KEYWORDS:
-        hjuk_url = HEALTHJOBSUK_URL.format(requests.utils.quote(keyword))
+        hjuk_url = f"https://www.healthjobsuk.com/job_search/rss?keyword={requests.utils.quote(keyword)}"
         if fetch_and_process_feed(hjuk_url, seen_jobs, f"HealthJobsUK ('{keyword}')"):
             any_new_jobs = True
 
@@ -202,12 +207,22 @@ def continuous_job_checker():
             check_for_new_jobs()
         except Exception as e:
             logging.critical(f"Unhandled error in job checker loop: {e}")
-        sleep_duration = 300  # 5 minutes
+        sleep_duration = 300
         logging.info(f"Cycle complete. Sleeping {sleep_duration / 60:.0f} minutes.")
         time.sleep(sleep_duration)
 
 if __name__ == "__main__":
+    # Start the job checker in a background thread
     checker_thread = threading.Thread(target=continuous_job_checker, daemon=True)
     checker_thread.start()
+
+    # --- TEST TELEGRAM MESSAGE ---
+    test_message = (
+        "🩺 *Test Message*\n"
+        "This is a test from your Junior Doctor Bot.\n"
+        "If you see this, Telegram messaging works!"
+    )
+    send_telegram_message(test_message)
+
     logging.info("Starting Flask server...")
     serve(app, host='0.0.0.0', port=10000)
