@@ -44,9 +44,11 @@ logging.basicConfig(
 # --- Flask Web Server ---
 app = Flask(__name__)
 
+# THIS IS THE ONLY EDITED SECTION
 @app.route('/')
 def index():
-    return "Junior Doctor Bot is running!"
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return f"Junior Doctor Bot is running! Last check-in at: {now}"
 
 # --- Helper Functions ---
 def load_seen_jobs():
