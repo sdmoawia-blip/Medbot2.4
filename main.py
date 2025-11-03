@@ -8,22 +8,25 @@ import feedparser
 import requests
 from flask import Flask
 from waitress import serve
+import re
 
 # --- Configuration ---
-# These are loaded from environment variables on Render for security.
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_BOT_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID", "YOUR_CHAT_ID")
 
 # --- Job Search & Filtering ---
-# Keywords to find relevant junior doctor roles
 SEARCH_KEYWORDS = [
-    "junior doctor", "junior clinical fellow", "clinical fellow", "medical fellow",
+    "junior doctor", "clinical fellow", "medical fellow",
     "foundation year 1", "foundation year 2", "foundation house officer 1",
     "foundation house officer 2", "FY1", "FY2", "senior house officer", "SHO",
-    "trust doctor", "trust grade doctor", "resident medical officer", "RMO"
+    "trust doctor", "trust grade doctor", "resident medical officer", "RMO",
+    "teaching fellow", "research fellow", "emergency medicine doctor",
+    "internal medicine doctor", "medical SHO", "surgical SHO", "paediatric SHO",
+    "clinical doctor", "medical doctor", "A&E doctor", "ED doctor",
+    "Accident & Emergency doctor"
 ]
 
-# RSS Feeds to monitor
+# --- RSS Feeds ---
 NHS_JOBS_URL = "https://www.jobs.nhs.uk/candidate/search/results?keyword={}&field=title&location=UK&sort=publicationDate&jobPostType=all&payBand=all&workArrangement=all&rss=1"
 HEALTHJOBSUK_URL = "https://www.healthjobsuk.com/rss/jobs?job_title={}&uk_only=1"
 
@@ -37,18 +40,15 @@ logging.basicConfig(
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 
-# --- Flask Web Server for Hosting ---
+# --- Flask Web Server ---
 app = Flask(__name__)
 
 @app.route('/')
 def index():
-    """Root endpoint to confirm the bot is running."""
     return "Junior Doctor Bot is running!"
 
-# --- Core Bot Logic ---
-
+# --- Helper Functions ---
 def load_seen_jobs():
-    """Loads the set of previously sent job links/IDs from the local JSON file."""
     if not os.path.exists(DB_FILE):
         return set()
     try:
@@ -60,7 +60,6 @@ def load_seen_jobs():
         return set()
 
 def save_seen_jobs(seen_jobs):
-    """Saves the updated set of sent job links/IDs to the local JSON file."""
     try:
         with open(DB_FILE, 'w') as f:
             json.dump(list(seen_jobs), f, indent=4)
@@ -68,7 +67,6 @@ def save_seen_jobs(seen_jobs):
         logging.error(f"Failed to save sent jobs to {DB_FILE}: {e}")
 
 def send_telegram_message(message):
-    """Sends a formatted message to the specified Telegram chat."""
     if BOT_TOKEN == "YOUR_BOT_TOKEN" or CHAT_ID == "YOUR_CHAT_ID":
         logging.warning("Bot Token or Chat ID is not configured. Skipping message send.")
         return False
@@ -82,7 +80,7 @@ def send_telegram_message(message):
     }
     try:
         response = requests.post(api_url, json=payload, timeout=10)
-        response.raise_for_status()  # Raises an exception for HTTP errors
+        response.raise_for_status()
         logging.info(f"Successfully sent message to chat {CHAT_ID}.")
         return True
     except requests.exceptions.RequestException as e:
@@ -90,7 +88,6 @@ def send_telegram_message(message):
         return False
 
 def parse_date(entry):
-    """Parses the publication date from a feed entry, handling various formats."""
     if hasattr(entry, 'published_parsed') and entry.published_parsed:
         return datetime.fromtimestamp(time.mktime(entry.published_parsed)).strftime('%d %b %Y')
     if hasattr(entry, 'published'):
@@ -98,11 +95,48 @@ def parse_date(entry):
             dt = datetime.strptime(entry.published, '%a, %d %b %Y %H:%M:%S %Z')
             return dt.strftime('%d %b %Y')
         except ValueError:
-            return "N/A" # Fallback if parsing fails
+            return "N/A"
     return "N/A"
 
+def extract_job_details(entry):
+    """Extracts a short snippet from the feed entry, plus employer, specialty, salary, location if possible."""
+    snippet = entry.get('summary', '') or entry.get('description', '') or ''
+    snippet = re.sub('<.*?>', '', snippet)  # Remove HTML tags
+
+    # Attempt to parse key fields using simple regex patterns
+    employer = re.search(r'Employer[:\s]*(.+?)(?:\n|$)', snippet, re.IGNORECASE)
+    specialty = re.search(r'Specialty[:\s]*(.+?)(?:\n|$)', snippet, re.IGNORECASE)
+    salary = re.search(r'Salary[:\s]*(.+?)(?:\n|$)', snippet, re.IGNORECASE)
+    location = re.search(r'Location[:\s]*(.+?)(?:\n|$)', snippet, re.IGNORECASE)
+
+    return {
+        "snippet": snippet.strip(),
+        "employer": employer.group(1).strip() if employer else None,
+        "specialty": specialty.group(1).strip() if specialty else None,
+        "salary": salary.group(1).strip() if salary else None,
+        "location": location.group(1).strip() if location else None
+    }
+
+def format_message(entry):
+    details = extract_job_details(entry)
+    job_title = entry.title.strip()
+    job_link = entry.link
+    published_date = parse_date(entry)
+
+    message = f"New Job Found @ {details['employer'] or 'Unknown Employer'}\n\n"
+    message += f"Job Link ({job_link})\n\n"
+    message += f"Title: {job_title}\n"
+    if details['employer']:
+        message += f"Employer: {details['employer']}\n"
+    if details['specialty']:
+        message += f"Specialty: {details['specialty']}\n"
+    if details['salary']:
+        message += f"Salary: {details['salary']}\n"
+    if details['location']:
+        message += f"Location: {details['location']}\n"
+    return message
+
 def fetch_and_process_feed(feed_url, seen_jobs, source_name):
-    """Fetches a single RSS feed and processes new entries."""
     new_jobs_found_count = 0
     try:
         feed = feedparser.parse(feed_url)
@@ -111,24 +145,14 @@ def fetch_and_process_feed(feed_url, seen_jobs, source_name):
 
         logging.info(f"Fetched {len(feed.entries)} entries from {source_name}.")
 
-        # Process entries from oldest to newest to send in chronological order
         for entry in reversed(feed.entries):
             job_id = entry.get('id', entry.link)
             if job_id not in seen_jobs:
-                job_title = entry.title.strip()
-                job_link = entry.link
-                published_date = parse_date(entry)
-
-                message = (
-                    f"🩺 **{job_title}**\n"
-                    f"📅 Published: {published_date}\n"
-                    f"🔗 [Link to apply]({job_link})"
-                )
-
+                message = format_message(entry)
                 if send_telegram_message(message):
                     seen_jobs.add(job_id)
                     new_jobs_found_count += 1
-                    time.sleep(2) # Stagger messages to avoid Telegram rate limits
+                    time.sleep(2)
 
     except Exception as e:
         logging.error(f"Error processing {source_name} feed at {feed_url}: {e}")
@@ -136,19 +160,16 @@ def fetch_and_process_feed(feed_url, seen_jobs, source_name):
     return new_jobs_found_count > 0
 
 def check_for_new_jobs():
-    """Main function to iterate through keywords and feeds to find new jobs."""
     seen_jobs = load_seen_jobs()
     any_new_jobs = False
 
     logging.info("Starting new job check cycle...")
 
     for keyword in SEARCH_KEYWORDS:
-        # 1. NHS Jobs
         nhs_url = NHS_JOBS_URL.format(requests.utils.quote(keyword))
         if fetch_and_process_feed(nhs_url, seen_jobs, f"NHS Jobs ('{keyword}')"):
             any_new_jobs = True
 
-        # 2. HealthJobsUK
         hjuk_url = HEALTHJOBSUK_URL.format(requests.utils.quote(keyword))
         if fetch_and_process_feed(hjuk_url, seen_jobs, f"HealthJobsUK ('{keyword}')"):
             any_new_jobs = True
@@ -160,23 +181,18 @@ def check_for_new_jobs():
         logging.info("No new jobs found in this cycle.")
 
 def continuous_job_checker():
-    """Runs the job check function in a loop with a delay."""
     while True:
         try:
             check_for_new_jobs()
         except Exception as e:
             logging.critical(f"An unhandled error occurred in the job checker loop: {e}")
-        
-        # Check every 8 minutes (480 seconds)
-        sleep_duration = 480
+        sleep_duration = 480  # 8 minutes
         logging.info(f"Check cycle complete. Sleeping for {sleep_duration / 60:.0f} minutes.")
         time.sleep(sleep_duration)
 
 if __name__ == "__main__":
-    # Start the job checker in a background thread
     checker_thread = threading.Thread(target=continuous_job_checker, daemon=True)
     checker_thread.start()
 
-    # Run the Flask app using Waitress, a production-ready server
     logging.info("Starting Flask server...")
     serve(app, host='0.0.0.0', port=10000)
