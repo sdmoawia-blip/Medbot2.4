@@ -9,6 +9,7 @@ import requests
 from bs4 import BeautifulSoup
 from flask import Flask
 from waitress import serve
+import re
 
 # --- Configuration ---
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_BOT_TOKEN")
@@ -16,15 +17,19 @@ CHAT_ID = os.environ.get("CHAT_ID", "YOUR_CHAT_ID")
 
 # --- Job Search & Filtering ---
 SEARCH_KEYWORDS = [
-    "junior doctor", "junior clinical fellow", "clinical fellow", "medical fellow",
+    "junior doctor", "clinical fellow", "medical fellow",
     "foundation year 1", "foundation year 2", "foundation house officer 1",
     "foundation house officer 2", "FY1", "FY2", "senior house officer", "SHO",
-    "trust doctor", "trust grade doctor", "resident medical officer", "RMO"
+    "trust doctor", "trust grade doctor", "resident medical officer", "RMO",
+    "teaching fellow", "research fellow", "emergency medicine doctor",
+    "internal medicine doctor", "medical SHO", "surgical SHO", "paediatric SHO",
+    "clinical doctor", "medical doctor", "A&E doctor", "ED doctor",
+    "Accident & Emergency doctor"
 ]
 
-# RSS Feeds
+# --- RSS Feeds ---
 NHS_JOBS_URL = "https://www.jobs.nhs.uk/candidate/search/results?keyword={}&field=title&location=UK&sort=publicationDate&jobPostType=all&payBand=all&workArrangement=all&rss=1"
-HEALTHJOBSUK_URL = "https://www.healthjobsuk.com/jobs.rss"
+HEALTHJOBSUK_URL = "https://www.healthjobsuk.com/job_search/rss?keyword={}"
 
 # --- Persistence & State Management ---
 DB_FILE = "seen_jobs.json"
@@ -44,7 +49,6 @@ def index():
     return "Junior Doctor Bot is running!"
 
 # --- Helper Functions ---
-
 def load_seen_jobs():
     if not os.path.exists(DB_FILE):
         return set()
@@ -94,23 +98,56 @@ def parse_date(entry):
             return "N/A"
     return "N/A"
 
-# --- Core Bot Logic with Feed Sanitization ---
+def extract_job_details(entry):
+    """Extracts a short snippet and optional fields from feed entry."""
+    snippet = entry.get('summary', '') or entry.get('description', '') or ''
+    snippet = re.sub('<.*?>', '', snippet)  # Remove HTML tags
+
+    employer = re.search(r'Employer[:\s]*(.+?)(?:\n|$)', snippet, re.IGNORECASE)
+    specialty = re.search(r'Specialty[:\s]*(.+?)(?:\n|$)', snippet, re.IGNORECASE)
+    salary = re.search(r'Salary[:\s]*(.+?)(?:\n|$)', snippet, re.IGNORECASE)
+    location = re.search(r'Location[:\s]*(.+?)(?:\n|$)', snippet, re.IGNORECASE)
+
+    return {
+        "snippet": snippet.strip(),
+        "employer": employer.group(1).strip() if employer else None,
+        "specialty": specialty.group(1).strip() if specialty else None,
+        "salary": salary.group(1).strip() if salary else None,
+        "location": location.group(1).strip() if location else None
+    }
+
+def format_message(entry):
+    details = extract_job_details(entry)
+    job_title = entry.title.strip()
+    job_link = entry.link
+    published_date = parse_date(entry)
+
+    message = f"New Job Found @ {details['employer'] or 'Unknown Employer'}\n\n"
+    message += f"Job Link ({job_link})\n\n"
+    message += f"Title: {job_title}\n"
+    if details['employer']:
+        message += f"Employer: {details['employer']}\n"
+    if details['specialty']:
+        message += f"Specialty: {details['specialty']}\n"
+    if details['salary']:
+        message += f"Salary: {details['salary']}\n"
+    if details['location']:
+        message += f"Location: {details['location']}\n"
+    return message
+
+# --- Core Bot Logic ---
 def fetch_and_process_feed(feed_url, seen_jobs, source_name):
     new_jobs_found_count = 0
-    headers = {
-        'User-Agent': 'UKJuniorDoctorBot/1.0; (automated job scraper)'
-    }
+    headers = {'User-Agent': 'UKJuniorDoctorBot/1.0'}
     try:
         logging.info(f"Fetching {source_name} from {feed_url}...")
         response = requests.get(feed_url, headers=headers, timeout=15)
         response.raise_for_status()
         raw_content = response.content
 
-        # --- SANITIZE FEED ---
         soup = BeautifulSoup(raw_content, "xml")
         sanitized_content = str(soup)
 
-        # --- PARSE FEED ---
         feed = feedparser.parse(sanitized_content)
         if feed.bozo:
             logging.warning(f"Warning processing {source_name}: Malformed feed data - {feed.bozo_exception}")
@@ -118,20 +155,12 @@ def fetch_and_process_feed(feed_url, seen_jobs, source_name):
         for entry in reversed(feed.entries):
             job_id = entry.get('id', entry.link)
             if job_id not in seen_jobs:
-                job_title = entry.title.strip()
-                job_link = entry.link
-                published_date = parse_date(entry)
-
-                message = (
-                    f"🩺 **{job_title}**\n"
-                    f"📅 Published: {published_date}\n"
-                    f"🔗 [Link to apply]({job_link})"
-                )
-
+                message = format_message(entry)
                 if send_telegram_message(message):
                     seen_jobs.add(job_id)
                     new_jobs_found_count += 1
                     time.sleep(2)
+
     except requests.exceptions.Timeout:
         logging.error(f"Timeout error when fetching {source_name} at {feed_url}.")
     except requests.exceptions.RequestException as e:
@@ -147,17 +176,17 @@ def check_for_new_jobs():
 
     logging.info("--- Starting new job check cycle ---")
 
-    # --- NHS Jobs ---
+    # NHS Jobs
     logging.info("--- Checking NHS Jobs ---")
     for keyword in SEARCH_KEYWORDS:
         nhs_url = NHS_JOBS_URL.format(requests.utils.quote(keyword))
         if fetch_and_process_feed(nhs_url, seen_jobs, f"NHS Jobs ('{keyword}')"):
             any_new_jobs = True
 
-    # --- HealthJobsUK ---
+    # HealthJobsUK
     logging.info("--- Checking HealthJobsUK ---")
     for keyword in SEARCH_KEYWORDS:
-        hjuk_url = f"https://www.healthjobsuk.com/job_search/rss?keyword={requests.utils.quote(keyword)}"
+        hjuk_url = HEALTHJOBSUK_URL.format(requests.utils.quote(keyword))
         if fetch_and_process_feed(hjuk_url, seen_jobs, f"HealthJobsUK ('{keyword}')"):
             any_new_jobs = True
 
@@ -173,7 +202,7 @@ def continuous_job_checker():
             check_for_new_jobs()
         except Exception as e:
             logging.critical(f"Unhandled error in job checker loop: {e}")
-        sleep_duration = 300
+        sleep_duration = 300  # 5 minutes
         logging.info(f"Cycle complete. Sleeping {sleep_duration / 60:.0f} minutes.")
         time.sleep(sleep_duration)
 
