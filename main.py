@@ -6,6 +6,7 @@ import logging
 from datetime import datetime
 import feedparser
 import requests
+from bs4 import BeautifulSoup
 from flask import Flask
 from waitress import serve
 import re
@@ -28,7 +29,7 @@ SEARCH_KEYWORDS = [
 
 # --- RSS Feeds ---
 NHS_JOBS_URL = "https://www.jobs.nhs.uk/candidate/search/results?keyword={}&field=title&location=UK&sort=publicationDate&jobPostType=all&payBand=all&workArrangement=all&rss=1"
-HEALTHJOBSUK_URL = "https://www.healthjobsuk.com/rss/jobs?job_title={}&uk_only=1"
+HEALTHJOBSUK_URL = "https://www.healthjobsuk.com/job_search/rss?keyword={}"
 
 # --- Persistence & State Management ---
 DB_FILE = "seen_jobs.json"
@@ -56,7 +57,7 @@ def load_seen_jobs():
             data = json.load(f)
             return set(data)
     except (json.JSONDecodeError, IOError) as e:
-        logging.warning(f"Could not read database file {DB_FILE}. Starting fresh. Error: {e}")
+        logging.warning(f"Could not read {DB_FILE}. Starting fresh. Error: {e}")
         return set()
 
 def save_seen_jobs(seen_jobs):
@@ -64,13 +65,12 @@ def save_seen_jobs(seen_jobs):
         with open(DB_FILE, 'w') as f:
             json.dump(list(seen_jobs), f, indent=4)
     except IOError as e:
-        logging.error(f"Failed to save sent jobs to {DB_FILE}: {e}")
+        logging.error(f"Failed to save sent jobs: {e}")
 
 def send_telegram_message(message):
     if BOT_TOKEN == "YOUR_BOT_TOKEN" or CHAT_ID == "YOUR_CHAT_ID":
         logging.warning("Bot Token or Chat ID is not configured. Skipping message send.")
         return False
-
     api_url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {
         'chat_id': CHAT_ID,
@@ -81,7 +81,7 @@ def send_telegram_message(message):
     try:
         response = requests.post(api_url, json=payload, timeout=10)
         response.raise_for_status()
-        logging.info(f"Successfully sent message to chat {CHAT_ID}.")
+        logging.info(f"Message sent to chat {CHAT_ID}.")
         return True
     except requests.exceptions.RequestException as e:
         logging.error(f"Failed to send Telegram message: {e}")
@@ -99,11 +99,10 @@ def parse_date(entry):
     return "N/A"
 
 def extract_job_details(entry):
-    """Extracts a short snippet from the feed entry, plus employer, specialty, salary, location if possible."""
+    """Extracts a short snippet and optional fields from feed entry."""
     snippet = entry.get('summary', '') or entry.get('description', '') or ''
     snippet = re.sub('<.*?>', '', snippet)  # Remove HTML tags
 
-    # Attempt to parse key fields using simple regex patterns
     employer = re.search(r'Employer[:\s]*(.+?)(?:\n|$)', snippet, re.IGNORECASE)
     specialty = re.search(r'Specialty[:\s]*(.+?)(?:\n|$)', snippet, re.IGNORECASE)
     salary = re.search(r'Salary[:\s]*(.+?)(?:\n|$)', snippet, re.IGNORECASE)
@@ -136,14 +135,22 @@ def format_message(entry):
         message += f"Location: {details['location']}\n"
     return message
 
+# --- Core Bot Logic ---
 def fetch_and_process_feed(feed_url, seen_jobs, source_name):
     new_jobs_found_count = 0
+    headers = {'User-Agent': 'UKJuniorDoctorBot/1.0'}
     try:
-        feed = feedparser.parse(feed_url)
-        if feed.bozo:
-            logging.warning(f"Warning processing {source_name}: {feed.bozo_exception}")
+        logging.info(f"Fetching {source_name} from {feed_url}...")
+        response = requests.get(feed_url, headers=headers, timeout=15)
+        response.raise_for_status()
+        raw_content = response.content
 
-        logging.info(f"Fetched {len(feed.entries)} entries from {source_name}.")
+        soup = BeautifulSoup(raw_content, "xml")
+        sanitized_content = str(soup)
+
+        feed = feedparser.parse(sanitized_content)
+        if feed.bozo:
+            logging.warning(f"Warning processing {source_name}: Malformed feed data - {feed.bozo_exception}")
 
         for entry in reversed(feed.entries):
             job_id = entry.get('id', entry.link)
@@ -154,8 +161,12 @@ def fetch_and_process_feed(feed_url, seen_jobs, source_name):
                     new_jobs_found_count += 1
                     time.sleep(2)
 
+    except requests.exceptions.Timeout:
+        logging.error(f"Timeout error when fetching {source_name} at {feed_url}.")
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Network error when fetching {source_name}: {e}")
     except Exception as e:
-        logging.error(f"Error processing {source_name} feed at {feed_url}: {e}")
+        logging.error(f"Unexpected error processing {source_name}: {e}", exc_info=True)
 
     return new_jobs_found_count > 0
 
@@ -163,36 +174,40 @@ def check_for_new_jobs():
     seen_jobs = load_seen_jobs()
     any_new_jobs = False
 
-    logging.info("Starting new job check cycle...")
+    logging.info("--- Starting new job check cycle ---")
 
+    # NHS Jobs
+    logging.info("--- Checking NHS Jobs ---")
     for keyword in SEARCH_KEYWORDS:
         nhs_url = NHS_JOBS_URL.format(requests.utils.quote(keyword))
         if fetch_and_process_feed(nhs_url, seen_jobs, f"NHS Jobs ('{keyword}')"):
             any_new_jobs = True
 
+    # HealthJobsUK
+    logging.info("--- Checking HealthJobsUK ---")
+    for keyword in SEARCH_KEYWORDS:
         hjuk_url = HEALTHJOBSUK_URL.format(requests.utils.quote(keyword))
         if fetch_and_process_feed(hjuk_url, seen_jobs, f"HealthJobsUK ('{keyword}')"):
             any_new_jobs = True
 
     if any_new_jobs:
         save_seen_jobs(seen_jobs)
-        logging.info("New jobs found and sent. Database updated.")
+        logging.info("New jobs were found and sent. Database updated.")
     else:
-        logging.info("No new jobs found in this cycle.")
+        logging.info("No new jobs found this cycle.")
 
 def continuous_job_checker():
     while True:
         try:
             check_for_new_jobs()
         except Exception as e:
-            logging.critical(f"An unhandled error occurred in the job checker loop: {e}")
-        sleep_duration = 480  # 8 minutes
-        logging.info(f"Check cycle complete. Sleeping for {sleep_duration / 60:.0f} minutes.")
+            logging.critical(f"Unhandled error in job checker loop: {e}")
+        sleep_duration = 300  # 5 minutes
+        logging.info(f"Cycle complete. Sleeping {sleep_duration / 60:.0f} minutes.")
         time.sleep(sleep_duration)
 
 if __name__ == "__main__":
     checker_thread = threading.Thread(target=continuous_job_checker, daemon=True)
     checker_thread.start()
-
     logging.info("Starting Flask server...")
     serve(app, host='0.0.0.0', port=10000)
