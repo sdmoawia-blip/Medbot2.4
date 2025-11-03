@@ -216,13 +216,5 @@ if __name__ == "__main__":
     checker_thread = threading.Thread(target=continuous_job_checker, daemon=True)
     checker_thread.start()
 
-    # --- TEST TELEGRAM MESSAGE ---
-    test_message = (
-        "🩺 *Test Message*\n"
-        "This is a test from your Junior Doctor Bot.\n"
-        "If you see this, Telegram messaging works!"
-    )
-    send_telegram_message(test_message)
-
     logging.info("Starting Flask server...")
     serve(app, host='0.0.0.0', port=10000)
