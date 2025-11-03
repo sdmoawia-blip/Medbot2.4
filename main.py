@@ -27,9 +27,9 @@ SEARCH_KEYWORDS = [
     "Accident & Emergency doctor"
 ]
 
-# --- RSS Feeds ---
-NHS_JOBS_URL = "https://www.jobs.nhs.uk/candidate/search/results?keyword={}&field=title&location=UK&sort=publicationDate&jobPostType=all&payBand=all&workArrangement=all&rss=1"
-HEALTHJOBSUK_URL = "https://www.healthjobsuk.com/jobs.rss"
+# --- RSS Feeds (Corrected and UK-Wide) ---
+NHS_JOBS_URL = "https://www.jobs.nhs.uk/candidate/search/results?keyword={}&field=title&sort=publicationDate&jobPostType=all&payBand=all&workArrangement=all&rss=1"
+HEALTHJOBSUK_URL_TEMPLATE = "https://www.healthjobsuk.com/job_search/rss?keyword={}"
 
 # --- Persistence & State Management ---
 DB_FILE = "seen_jobs.json"
@@ -99,11 +99,9 @@ def parse_date(entry):
     return "N/A"
 
 def extract_job_details(entry):
-    """Extracts a short snippet from the feed entry, plus employer, specialty, salary, location if possible."""
     snippet = entry.get('summary', '') or entry.get('description', '') or ''
     snippet = re.sub('<.*?>', '', snippet)  # Remove HTML tags
 
-    # Attempt to parse key fields using simple regex patterns
     employer = re.search(r'Employer[:\s]*(.+?)(?:\n|$)', snippet, re.IGNORECASE)
     specialty = re.search(r'Specialty[:\s]*(.+?)(?:\n|$)', snippet, re.IGNORECASE)
     salary = re.search(r'Salary[:\s]*(.+?)(?:\n|$)', snippet, re.IGNORECASE)
@@ -121,41 +119,40 @@ def format_message(entry):
     details = extract_job_details(entry)
     job_title = entry.title.strip()
     job_link = entry.link
-    published_date = parse_date(entry)
 
-    message = f"New Job Found @ {details['employer'] or 'Unknown Employer'}\n\n"
-    message += f"Job Link ({job_link})\n\n"
-    message += f"Title: {job_title}\n"
+    # Using a more user-friendly format with emojis
+    message = f"🩺 **{job_title}**\n\n"
     if details['employer']:
-        message += f"Employer: {details['employer']}\n"
-    if details['specialty']:
-        message += f"Specialty: {details['specialty']}\n"
-    if details['salary']:
-        message += f"Salary: {details['salary']}\n"
+        message += f"🏢 **Employer:** {details['employer']}\n"
     if details['location']:
-        message += f"Location: {details['location']}\n"
+        message += f"📍 **Location:** {details['location']}\n"
+    if details['specialty']:
+        message += f"⚕️ **Specialty:** {details['specialty']}\n"
+    if details['salary']:
+        message += f"💰 **Salary:** {details['salary']}\n"
+    
+    published_date = parse_date(entry)
+    message += f"📅 **Published:** {published_date}\n\n"
+    message += f"🔗 [**Apply Here**]({job_link})"
+    
     return message
 
 # --- Core Bot Logic with Feed Sanitization ---
 def fetch_and_process_feed(feed_url, seen_jobs, source_name):
     new_jobs_found_count = 0
-    headers = {
-        'User-Agent': 'UKJuniorDoctorBot/1.0; (automated job scraper)'
-    }
+    headers = {'User-Agent': 'UKJuniorDoctorBot/1.0; (automated job scraper)'}
     try:
         logging.info(f"Fetching {source_name} from {feed_url}...")
         response = requests.get(feed_url, headers=headers, timeout=15)
         response.raise_for_status()
         raw_content = response.content
+        logging.info(f"Successfully fetched content for {source_name}.")
 
-        # --- SANITIZE FEED ---
+        # Sanitize and parse the feed
         soup = BeautifulSoup(raw_content, "xml")
-        sanitized_content = str(soup)
-
-        # --- PARSE FEED ---
-        feed = feedparser.parse(sanitized_content)
+        feed = feedparser.parse(str(soup))
         if feed.bozo:
-            logging.warning(f"Warning processing {source_name}: Malformed feed data - {feed.bozo_exception}")
+            logging.warning(f"Malformed feed data for {source_name} - {feed.bozo_exception}")
 
         for entry in reversed(feed.entries):
             job_id = entry.get('id', entry.link)
@@ -167,7 +164,7 @@ def fetch_and_process_feed(feed_url, seen_jobs, source_name):
                     time.sleep(2)
 
     except requests.exceptions.Timeout:
-        logging.error(f"Timeout error when fetching {source_name} at {feed_url}.")
+        logging.error(f"Timeout error when fetching {source_name}.")
     except requests.exceptions.RequestException as e:
         logging.error(f"Network error when fetching {source_name}: {e}")
     except Exception as e:
@@ -191,7 +188,7 @@ def check_for_new_jobs():
     # --- HealthJobsUK ---
     logging.info("--- Checking HealthJobsUK ---")
     for keyword in SEARCH_KEYWORDS:
-        hjuk_url = f"https://www.healthjobsuk.com/job_search/rss?keyword={requests.utils.quote(keyword)}"
+        hjuk_url = HEALTHJOBSUK_URL_TEMPLATE.format(requests.utils.quote(keyword))
         if fetch_and_process_feed(hjuk_url, seen_jobs, f"HealthJobsUK ('{keyword}')"):
             any_new_jobs = True
 
